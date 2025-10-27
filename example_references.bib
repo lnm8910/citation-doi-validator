@@ -1,0 +1,65 @@
+% Example BibTeX File for Testing Citation DOI Validator
+% Contains mix of valid, invalid, and problematic citations
+
+% VERIFIED - Should pass all checks
+@article{travistorrent_msr2017,
+  author = {Beller, Moritz and Gousios, Georgios and Zaidman, Andy},
+  title = {TravisTorrent: Synthesizing Travis CI and GitHub for Full-Stack Research on Continuous Integration},
+  booktitle = {Proceedings of the 14th International Conference on Mining Software Repositories (MSR)},
+  year = {2017},
+  pages = {447--450},
+  doi = {10.1109/MSR.2017.24}
+}
+
+% VERIFIED - Recent paper, should pass
+@article{space_framework,
+  author = {Forsgren, Nicole and Storey, Margaret-Anne and Maddila, Chandra and Zimmermann, Thomas and Houck, Brian and Butler, Jenna},
+  title = {The SPACE of developer productivity},
+  journal = {Communications of the ACM},
+  year = {2021},
+  volume = {64},
+  number = {12},
+  pages = {67--75},
+  doi = {10.1145/3453928}
+}
+
+% INVALID DOI - Should trigger DOI_INVALID
+@article{fake_paper,
+  author = {Smith, John and Doe, Jane},
+  title = {An Imaginary Paper That Does Not Exist},
+  journal = {Fake Journal},
+  year = {2023},
+  doi = {10.1234/FAKE.2023.999}
+}
+
+% WARNING - Year might be off (preprint vs final version)
+@article{dl_cibuild,
+  author = {Saidani, Imen and Ouni, Ali and Mkaouer, Mohamed Wiem},
+  title = {Improving the Prediction of Continuous Integration Build Failures Using Deep Learning},
+  journal = {Automated Software Engineering},
+  year = {2022},
+  volume = {29},
+  doi = {10.1007/s10515-021-00319-5}
+}
+
+% VERIFIED - arXiv preprint (tests doi.org fallback)
+@article{attention_is_all_you_need,
+  author = {Vaswani, Ashish and Shazeer, Noam and Parmar, Niki and Uszkoreit, Jakob and Jones, Llion and Gomez, Aidan N and Kaiser, {\L}ukasz and Polosukhin, Illia},
+  title = {Attention is All you Need},
+  journal = {Advances in Neural Information Processing Systems},
+  year = {2017},
+  volume = {30},
+  eprint = {1706.03762},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.CL}
+}
+
+% NO DOI - Should trigger warning about missing DOI
+@book{knuth1997art,
+  author = {Knuth, Donald E.},
+  title = {The Art of Computer Programming, Volume 1: Fundamental Algorithms},
+  publisher = {Addison-Wesley},
+  year = {1997},
+  edition = {3rd},
+  isbn = {0201896834}
+}

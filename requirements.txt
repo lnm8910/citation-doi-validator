@@ -1,0 +1,12 @@
+# Citation DOI Validator - Dependencies
+# Academic Citation Verification Tool
+# Authors: Lalit Narayan Mishra, Amit Rangari, Sandesh Nagrare, Saroj Kumar Nayak
+# Repository: https://github.com/lnm8910/citation-doi-validator
+
+# HTTP Requests Library (required for API calls)
+requests>=2.28.0
+
+# Optional: Enhanced features (uncomment if needed)
+# bibtexparser>=1.4.0  # More robust BibTeX parsing
+# tqdm>=4.65.0         # Progress bars for large batch jobs
+# pandas>=2.0.0        # Export verification results to CSV/Excel
