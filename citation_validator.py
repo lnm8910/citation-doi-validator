@@ -9,7 +9,7 @@ Verifies citations in BibTeX files by checking:
 4. Publication year/venue accuracy
 5. Cross-reference with academic databases (Semantic Scholar)
 
-Author: Lalit Narayan Mishra, Amit Rangari, Sandesh Nagrare, Saroj Kumar Nayak
+Author: Lalit Narayan Mishra
 License: MIT
 Repository: https://github.com/lnm8910/citation-doi-validator
 """
@@ -32,7 +32,7 @@ except ImportError:
 
 
 __version__ = "1.0.0"
-__author__ = "Lalit Narayan Mishra, Amit Rangari, Sandesh Nagrare, Saroj Kumar Nayak"
+__author__ = "Lalit Narayan Mishra"
 
 
 class CitationVerifier:

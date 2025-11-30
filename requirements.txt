@@ -1,6 +1,6 @@
 # Citation DOI Validator - Dependencies
 # Academic Citation Verification Tool
-# Authors: Lalit Narayan Mishra, Amit Rangari, Sandesh Nagrare, Saroj Kumar Nayak
+# Authors: Lalit Narayan Mishra
 # Repository: https://github.com/lnm8910/citation-doi-validator
 
 # HTTP Requests Library (required for API calls)

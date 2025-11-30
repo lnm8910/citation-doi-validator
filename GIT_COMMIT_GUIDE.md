@@ -162,8 +162,7 @@ Developed by:
 
 ```bibtex
 @software{mishra2025validator,
-  author = {Mishra, Lalit Narayan and Rangari, Amit and
-            Nagrare, Sandesh and Nayak, Saroj Kumar},
+  author = {Mishra, Lalit Narayan},
   title = {Citation DOI Validator: Academic Citation Verification Tool},
   year = {2025},
   url = {https://github.com/lnm8910/citation-doi-validator},

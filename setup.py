@@ -22,7 +22,7 @@ setup(
     description='Academic citation verification tool for BibTeX files',
     long_description=long_description,
     long_description_content_type='text/markdown',
-    author='Lalit Narayan Mishra, Amit Rangari, Sandesh Nagrare, Saroj Kumar Nayak',
+    author='Lalit Narayan Mishra',
     author_email='lnm8910@gmail.com',
     url='https://github.com/lnm8910/citation-doi-validator',
     license='MIT',
