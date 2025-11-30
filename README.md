@@ -607,7 +607,7 @@ MIT License - see [LICENSE](LICENSE) file
 
 ## 👥 Authors
 
-**Lalit Narayan Mishra** (Corresponding Author)
+**Lalit Narayan Mishra**
 - 🏢 Lowe's Companies, Inc., Charlotte, NC, USA
 - 📧 lnm8910@gmail.com
 - 🔗 GitHub: [@lnm8910](https://github.com/lnm8910)
