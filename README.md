@@ -595,8 +595,7 @@ MIT License - see [LICENSE](LICENSE) file
 
 ```bibtex
 @software{mishra2025validator,
-  author = {Mishra, Lalit Narayan and Rangari, Amit and
-            Nagrare, Sandesh and Nayak, Saroj Kumar},
+  author = {Mishra, Lalit Narayan},
   title = {Citation DOI Validator: Academic Citation Verification Tool},
   year = {2025},
   url = {https://github.com/lnm8910/citation-doi-validator},
@@ -612,19 +611,6 @@ MIT License - see [LICENSE](LICENSE) file
 - 🏢 Lowe's Companies, Inc., Charlotte, NC, USA
 - 📧 lnm8910@gmail.com
 - 🔗 GitHub: [@lnm8910](https://github.com/lnm8910)
-
-**Amit Rangari**
-- 🏢 JPMorgan Chase & Co, Atlanta, GA, USA
-- 📧 amitrangari@gmail.com
-
-**Sandesh Nagrare**
-- 🏢 Digital Remedy, New York, NY, USA
-- 📧 sandesh.nagrare@colorado.edu
-
-**Saroj Kumar Nayak**
-- 🏢 Cognizant Technology Solutions, Charlotte, NC, USA
-- 📧 saroj.nayak@gmail.com
-
 ---
 
 ## 🙏 Acknowledgments
