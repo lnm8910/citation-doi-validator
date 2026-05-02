@@ -54,15 +54,14 @@ test_references.bib
 test_output/
 
 # OS
-.DS_Store
 Thumbs.db
 
 # Temporary Files
 *.tmp
 *.bak
-*.swp
 
 # Coverage Reports
 htmlcov/
 .coverage
 .pytest_cache/
+.idea

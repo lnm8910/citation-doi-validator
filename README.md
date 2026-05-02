@@ -124,12 +124,16 @@ python citation_validator.py --bib references.bib --start 1 --end 150 --output f
 - ✅ Resolves DOI to canonical metadata
 - ❌ Detects invalid/non-existent DOIs
 
-### Author Verification
+### Author Verification (v1.1.0 rewrite)
 - ✅ Extracts authors from BibTeX entry
-- ✅ Queries CrossRef/Semantic Scholar for actual authors
-- ✅ Uses fuzzy string matching (SequenceMatcher) to handle name variations
-- ❌ Detects fabricated authors (similarity < 30%)
-- ⚠️ Warns on partial matches (similarity 30-80%)
+- ✅ Queries CrossRef / Semantic Scholar for actual authors
+- ✅ Structure-aware matching: per-author **last name** fuzzy match (≥ 0.9 similarity) gated on **first-initial** agreement
+- ✅ Order-independent (any-of comparison across the actual author list)
+- ✅ Tolerates initials-only given names ("Smith, J." matches "John Smith")
+- ❌ Detects fabricated authors when matched fraction < 0.5
+- ⚠️ Flags partial mismatches when matched fraction is between 0.5 and 0.8
+
+> The v1.0.0 behavior of fuzzy-matching the full "given family" string with `SequenceMatcher` was replaced because it produced false PARTIAL_MATCH on legitimate initials-only entries and false-negative FABRICATED on randomly-named fraud (e.g., one citation with all three authors replaced was reported as PARTIAL_MATCH/WARNING).
 
 ### Metadata Verification
 - ✅ **Title**: Fuzzy matching (threshold: 80% similarity)
@@ -141,11 +145,14 @@ python citation_validator.py --bib references.bib --start 1 --end 150 --output f
 
 | Status | Meaning | Severity |
 |--------|---------|----------|
-| ✅ **VERIFIED** | All checks passed, citation is authentic | OK |
+| ✅ **VERIFIED** | All checks passed and at least one source confirmed the citation | OK |
+| ❓ **UNVERIFIED** | No DOI provided (or no authoritative source confirmed it). Status is *not* a pass | MEDIUM |
 | ⚠️ **WARNING** | 1 minor issue detected (e.g., year mismatch) | MEDIUM |
 | 🔍 **SUSPICIOUS** | 2+ issues detected, manual review needed | HIGH |
 | ❌ **DOI_INVALID** | DOI does not exist in any database | CRITICAL |
 | ❌ **FABRICATED** | Authors completely wrong, likely fake citation | CRITICAL |
+
+> **Behavior change in v1.1.0:** entries without a DOI (and without a high-confidence Semantic Scholar match on the title) now report `UNVERIFIED` instead of falling through to `VERIFIED`. This closes a significant false-positive class. See `CHANGELOG.md` for the full list of correctness fixes.
 
 ---
 
@@ -271,28 +278,33 @@ python citation_validator.py --bib old_references.bib --start 1 --end 200 \
 ```
 BibTeX Entry
     ↓
-1. Parse entry (extract DOI, authors, title, year)
+1. Parse entry (brace-balanced scanner: handles {{nested}} braces, multi-line fields)
+   Normalize DOI (strip URL prefix, whitespace, punctuation)
     ↓
 2. Query CrossRef API (if DOI present)
-    ├─ Success → Extract actual metadata
-    └─ Fail → Fallback to doi.org Handle System
+    ├─ Success → extract actual metadata, mark "confirmed"
+    └─ 404/error → fall back to doi.org Handle System (existence check)
     ↓
 3. Compare claimed vs actual metadata
-    ├─ Authors (fuzzy matching, threshold: 80%)
-    ├─ Title (fuzzy matching, threshold: 80%)
-    ├─ Year (exact match)
-    └─ Venue (name verification)
+    ├─ Authors: per-author last-name fuzzy match (≥ 0.9) + first-initial agreement
+    ├─ Title:   fuzzy matching, threshold 0.8
+    ├─ Year:    exact match
+    └─ Venue:   name verification
     ↓
-4. Determine status
-    ├─ All pass → ✅ VERIFIED
-    ├─ 1 issue → ⚠️ WARNING
-    ├─ 2+ issues → 🔍 SUSPICIOUS
-    ├─ DOI invalid → ❌ DOI_INVALID
-    └─ Authors <30% match → ❌ FABRICATED
+4. If DOI not confirmed (or no DOI): query Semantic Scholar by title.
+   Title similarity ≥ 0.85 also counts as a "confirming" source.
     ↓
-5. Generate fix suggestions (if applicable)
+5. Determine status (precedence order)
+    ├─ Authors fail < 0.5 fraction matched → ❌ FABRICATED
+    ├─ DOI not found in any source         → ❌ DOI_INVALID
+    ├─ ≥ 2 issues                          → 🔍 SUSPICIOUS
+    ├─ 1 issue                             → ⚠️ WARNING
+    ├─ 0 issues, confirmed by ≥ 1 source   → ✅ VERIFIED
+    └─ 0 issues, no source confirmed       → ❓ UNVERIFIED
     ↓
-6. Output report (markdown/JSON/text)
+6. Generate fix suggestions (corrected BibTeX with display-cased authors)
+    ↓
+7. Output report (markdown/JSON/text)
 ```
 
 ### APIs Used
@@ -416,6 +428,39 @@ Path('verification_report.md').write_text(report)
 fabricated = [r for r in results if r['verification']['overall_status'] == 'FABRICATED']
 print(f"Found {len(fabricated)} fabricated citations")
 ```
+
+---
+
+## 🧪 Testing
+
+A regression test suite ships with the project so you can verify behavior after any change.
+
+```bash
+# Run all 25 cases (~20 seconds, requires internet)
+python tests/run_validation_suite.py
+
+# Filter to one suite for fast iteration
+python tests/run_validation_suite.py --suite mutated
+
+# Filter to a single case across all suites
+python tests/run_validation_suite.py --case e3_all_swap
+
+# Forward verbose API logs
+python tests/run_validation_suite.py --verbose
+```
+
+Exit code is `0` if every case passes, `1` if any case fails. Suitable for direct use in CI.
+
+The suite covers:
+- **mutated** (12 cases): parser edge cases, DOI normalization, status determination, fabrication detection.
+- **manual_author_edits** (8 cases): author-edit fraud regression (the case originally reported as missed).
+- **real_world_stable** (5 cases): live integration with CrossRef, doi.org, and Semantic Scholar.
+
+Adding a new case is a two-file change (no new scripts):
+1. Add the BibTeX entry to a fixture in `tests/fixtures/`.
+2. Add a `{key, expected, probes}` object to the matching suite in `tests/expectations.json`.
+
+Full documentation: `execution/VALIDATION_SUITE.md`. Per-case scenarios: `tests/TEST_SCENARIOS.md`.
 
 ---
 
@@ -594,12 +639,12 @@ MIT License - see [LICENSE](LICENSE) file
 **Citation**: If you use this tool in academic research, please cite:
 
 ```bibtex
-@software{mishra2025validator,
+@software{mishra2026validator,
   author = {Mishra, Lalit Narayan},
   title = {Citation DOI Validator: Academic Citation Verification Tool},
-  year = {2025},
+  year = {2026},
   url = {https://github.com/lnm8910/citation-doi-validator},
-  version = {1.0.0}
+  version = {1.1.0}
 }
 ```
 
@@ -650,8 +695,8 @@ If you find this tool useful:
 
 ---
 
-**Version**: 1.0.0
-**Last Updated**: January 2025
+**Version**: 1.1.0
+**Last Updated**: May 2026
 **Maintained by**: [@lnm8910](https://github.com/lnm8910)
 
 🔖 **Keywords**: Citation Verification, DOI Validation, BibTeX, Academic Integrity, Research Tools, CrossRef API, Semantic Scholar, Reference Manager, Peer Review, Plagiarism Detection

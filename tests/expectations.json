@@ -1,0 +1,49 @@
+{
+  "_comment": "Test expectations for citation_validator. Each case maps a BibTeX key to its expected verification status. 'expected' may be a string or list of acceptable statuses. Run via: python tests/run_validation_suite.py",
+  "suites": {
+    "mutated": {
+      "bib": "fixtures/mutated.bib",
+      "description": "Broad probe set: parser edge cases, DOI normalization, status determination, fabrication detection.",
+      "cases": [
+        {"key": "m1_real",            "expected": "VERIFIED",     "probes": "Clean control: real DOI + real authors + real title"},
+        {"key": "m2_wrong_year",      "expected": "WARNING",      "probes": "Year mismatch detection (single issue)"},
+        {"key": "m3_fab_authors",     "expected": "FABRICATED",   "probes": "Real DOI + completely fabricated authors must be FABRICATED"},
+        {"key": "m4_initials_only",   "expected": "VERIFIED",     "probes": "Initials-only given names must NOT trigger PARTIAL_MATCH"},
+        {"key": "m5_fake_doi",        "expected": "DOI_INVALID",  "probes": "Invented DOI"},
+        {"key": "m6_whitespace_doi",  "expected": "DOI_INVALID",  "probes": "Whitespace-padded DOI must still be parsed and queried"},
+        {"key": "m7_doi_as_url",      "expected": "VERIFIED",     "probes": "DOI given as full URL must be normalized and resolved"},
+        {"key": "m8_no_doi_fake",     "expected": "UNVERIFIED",   "probes": "No DOI + fake title must NOT silently VERIFY"},
+        {"key": "m9_no_doi_no_title", "expected": "UNVERIFIED",   "probes": "Empty entry must NOT silently VERIFY"},
+        {"key": "m10_unicode_accent", "expected": "VERIFIED",     "probes": "LaTeX accents in author names should not break matching"},
+        {"key": "m11_nested_braces",  "expected": "VERIFIED",     "probes": "Nested braces in title must be parsed correctly"},
+        {"key": "m12_multiline",      "expected": "VERIFIED",     "probes": "Multi-line author field with trailing comma must parse"}
+      ]
+    },
+    "manual_author_edits": {
+      "bib": "fixtures/manual_author_edits.bib",
+      "description": "Author-edit fraud probes (regression for the originally-reported user bug).",
+      "cases": [
+        {"key": "e1_real",             "expected": ["VERIFIED", "WARNING"],     "probes": "Control. Author check must pass; title is short so a TITLE_MISMATCH WARNING is acceptable.", "notes": "Probe titles are intentionally short ('TravisTorrent') so author logic is the variable under test."},
+        {"key": "e2_one_swap",         "expected": ["SUSPICIOUS", "WARNING"],   "probes": "1 of 3 authors swapped: must be flagged (PARTIAL_MATCH or worse)"},
+        {"key": "e3_all_swap",         "expected": "FABRICATED",                "probes": "All 3 authors fully replaced: must be FABRICATED"},
+        {"key": "e4_last_name_change", "expected": "FABRICATED",                "probes": "Subtle fraud: given names kept, last names swapped: must be FABRICATED"},
+        {"key": "e5_extra_author",     "expected": ["SUSPICIOUS", "WARNING"],   "probes": "Real authors plus 1 fake prepended: must be flagged"},
+        {"key": "e6_typo_last",        "expected": ["VERIFIED", "WARNING"],     "probes": "Single-char typo on last name: should match (similarity >= 0.9 threshold)"},
+        {"key": "e7_initials",         "expected": ["VERIFIED", "WARNING"],     "probes": "Given names reduced to initials: author check must pass"},
+        {"key": "e8_shuffled",         "expected": ["VERIFIED", "WARNING"],     "probes": "Author order shuffled: order-independent matching must pass"}
+      ]
+    },
+    "real_world_stable": {
+      "bib": "fixtures/real_world_stable.bib",
+      "description": "Stable real-world cases pulled from example_references_1.bib. Tests integration with live CrossRef / doi.org / Semantic Scholar.",
+      "requires_network": true,
+      "cases": [
+        {"key": "rw_dekimpe1995empirical",      "expected": "VERIFIED",    "probes": "Real DOI + initials-only authors: end-to-end verification"},
+        {"key": "rw_brisset2018models",         "expected": "DOI_INVALID", "probes": "DOI returns 404 from both CrossRef and doi.org Handle"},
+        {"key": "rw_hanssens1980market",        "expected": "FABRICATED",  "probes": "DOI resolves but to a different paper than claimed"},
+        {"key": "rw_vallecruz2022twitter",      "expected": "DOI_INVALID", "probes": "Another confirmed-404 DOI"},
+        {"key": "rw_montgomery2015introduction","expected": "UNVERIFIED",  "probes": "No DOI book entry must not silently VERIFY"}
+      ]
+    }
+  }
+}

@@ -1,0 +1,99 @@
+% Mutated BibTeX file to probe Citation DOI Validator behavior.
+% Each entry is annotated with EXPECTED ground-truth status.
+
+% [GROUND TRUTH: VERIFIED] real entry, exact metadata
+@article{m1_real,
+  author = {Beller, Moritz and Gousios, Georgios and Zaidman, Andy},
+  title = {TravisTorrent: Synthesizing Travis CI and GitHub for Full-Stack Research on Continuous Integration},
+  booktitle = {MSR 2017},
+  year = {2017},
+  doi = {10.1109/MSR.2017.24}
+}
+
+% [GROUND TRUTH: WARNING / YEAR_MISMATCH] same paper, deliberately wrong year
+@article{m2_wrong_year,
+  author = {Beller, Moritz and Gousios, Georgios and Zaidman, Andy},
+  title = {TravisTorrent: Synthesizing Travis CI and GitHub for Full-Stack Research on Continuous Integration},
+  year = {1999},
+  doi = {10.1109/MSR.2017.24}
+}
+
+% [GROUND TRUTH: FABRICATED] real DOI, totally wrong authors
+@article{m3_fab_authors,
+  author = {Doe, Jane Q. and Public, Joe},
+  title = {TravisTorrent: Synthesizing Travis CI and GitHub for Full-Stack Research on Continuous Integration},
+  year = {2017},
+  doi = {10.1109/MSR.2017.24}
+}
+
+% [GROUND TRUTH: VERIFIED-but-with-initials] initials-only authors should NOT be PARTIAL_MATCH
+@article{m4_initials_only,
+  author = {Beller, M. and Gousios, G. and Zaidman, A.},
+  title = {TravisTorrent: Synthesizing Travis CI and GitHub for Full-Stack Research on Continuous Integration},
+  year = {2017},
+  doi = {10.1109/MSR.2017.24}
+}
+
+% [GROUND TRUTH: DOI_INVALID] obviously fake
+@article{m5_fake_doi,
+  author = {Smith, John},
+  title = {Imaginary work},
+  year = {2024},
+  doi = {10.1234/FAKE.2024.999}
+}
+
+% [GROUND TRUTH: DOI_INVALID] DOI with whitespace - should be normalized
+@article{m6_whitespace_doi,
+  author = {Smith, John},
+  title = {Imaginary work},
+  year = {2024},
+  doi = { 10.1234/FAKE.2024.999 }
+}
+
+% [GROUND TRUTH: WARNING-or-better] valid DOI given as a URL — should be normalized
+@article{m7_doi_as_url,
+  author = {Beller, Moritz and Gousios, Georgios and Zaidman, Andy},
+  title = {TravisTorrent: Synthesizing Travis CI and GitHub for Full-Stack Research on Continuous Integration},
+  year = {2017},
+  doi = {https://doi.org/10.1109/MSR.2017.24}
+}
+
+% [GROUND TRUTH: should NOT be VERIFIED] no DOI, totally fabricated paper
+@article{m8_no_doi_fake,
+  author = {Nemo, Captain},
+  title = {A study of submarine economics in the year 2099},
+  journal = {Journal of Underwater Things},
+  year = {2099}
+}
+
+% [GROUND TRUTH: should NOT be VERIFIED] no DOI, no title — empty entry
+@article{m9_no_doi_no_title,
+  author = {Anon},
+  year = {2024}
+}
+
+% [GROUND TRUTH: VERIFIED] real DOI, unicode accents in author
+@article{m10_unicode_accent,
+  author = {Vaswani, Ashish and Shazeer, Noam and Parmar, Niki and Uszkoreit, Jakob and Jones, Llion and Gomez, Aidan N and Kaiser, {\L}ukasz and Polosukhin, Illia},
+  title = {Attention is All you Need},
+  year = {2017},
+  doi = {10.48550/arXiv.1706.03762}
+}
+
+% [GROUND TRUTH: should parse] title with nested braces
+@article{m11_nested_braces,
+  author = {Beller, Moritz and Gousios, Georgios and Zaidman, Andy},
+  title = {{TravisTorrent}: Synthesizing {Travis CI} and {GitHub} for Full-Stack Research on {C}ontinuous {I}ntegration},
+  year = {2017},
+  doi = {10.1109/MSR.2017.24}
+}
+
+% [GROUND TRUTH: should parse] field on multiple lines and trailing comma
+@article{m12_multiline,
+  author = {Beller, Moritz and
+            Gousios, Georgios and
+            Zaidman, Andy},
+  title = {TravisTorrent: Synthesizing Travis CI and GitHub for Full-Stack Research on Continuous Integration},
+  year = {2017},
+  doi = {10.1109/MSR.2017.24},
+}

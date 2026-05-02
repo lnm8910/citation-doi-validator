@@ -1,0 +1,67 @@
+% Probes for the user-reported bug: "manual author name changes not caught".
+% Real DOI in every entry (TravisTorrent, real authors: Beller, Gousios, Zaidman).
+% Each entry deliberately edits author names and is annotated with EXPECTED status.
+
+% [VERIFIED] real
+@article{e1_real,
+  author = {Beller, Moritz and Gousios, Georgios and Zaidman, Andy},
+  title = {TravisTorrent},
+  year = {2017},
+  doi = {10.1109/MSR.2017.24}
+}
+
+% [FABRICATED] one author replaced with completely different name
+@article{e2_one_swap,
+  author = {Beller, Moritz and Gousios, Georgios and Smith, John},
+  title = {TravisTorrent},
+  year = {2017},
+  doi = {10.1109/MSR.2017.24}
+}
+
+% [FABRICATED] all three authors replaced
+@article{e3_all_swap,
+  author = {Smith, John and Doe, Jane and Roe, Richard},
+  title = {TravisTorrent},
+  year = {2017},
+  doi = {10.1109/MSR.2017.24}
+}
+
+% [FABRICATED] last names changed but given names kept (subtle fraud)
+@article{e4_last_name_change,
+  author = {Smith, Moritz and Jones, Georgios and Brown, Andy},
+  title = {TravisTorrent},
+  year = {2017},
+  doi = {10.1109/MSR.2017.24}
+}
+
+% [FABRICATED] one author added at the front (extra fake author)
+@article{e5_extra_author,
+  author = {Fakey, McFakeface and Beller, Moritz and Gousios, Georgios and Zaidman, Andy},
+  title = {TravisTorrent},
+  year = {2017},
+  doi = {10.1109/MSR.2017.24}
+}
+
+% [VERIFIED] last name has typo (single character) — should still pass
+@article{e6_typo_last,
+  author = {Bellerr, Moritz and Gousios, Georgios and Zaidman, Andy},
+  title = {TravisTorrent},
+  year = {2017},
+  doi = {10.1109/MSR.2017.24}
+}
+
+% [VERIFIED] given names abbreviated to initials only
+@article{e7_initials,
+  author = {Beller, M. and Gousios, G. and Zaidman, A.},
+  title = {TravisTorrent},
+  year = {2017},
+  doi = {10.1109/MSR.2017.24}
+}
+
+% [VERIFIED] author order shuffled
+@article{e8_shuffled,
+  author = {Zaidman, Andy and Beller, Moritz and Gousios, Georgios},
+  title = {TravisTorrent},
+  year = {2017},
+  doi = {10.1109/MSR.2017.24}
+}

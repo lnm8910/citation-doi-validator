@@ -18,7 +18,7 @@ long_description = readme_file.read_text(encoding='utf-8') if readme_file.exists
 
 setup(
     name='citation-doi-validator',
-    version='1.0.0',
+    version='1.1.0',
     description='Academic citation verification tool for BibTeX files',
     long_description=long_description,
     long_description_content_type='text/markdown',

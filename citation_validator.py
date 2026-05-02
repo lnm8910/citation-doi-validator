@@ -19,10 +19,15 @@ import json
 import re
 import sys
 import time
+import warnings
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from difflib import SequenceMatcher
+
+# Suppress the urllib3 LibreSSL warning that fires on macOS-system-Python the moment
+# urllib3 is imported. This must run *before* `import requests`.
+warnings.filterwarnings("ignore", message=r"urllib3 v2 only supports OpenSSL 1\.1\.1\+")
 
 try:
     import requests
@@ -31,8 +36,56 @@ except ImportError:
     sys.exit(1)
 
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __author__ = "Lalit Narayan Mishra"
+
+
+RATE_LIMIT_SECONDS = 0.5
+
+LAST_NAME_MATCH_THRESHOLD = 0.9
+GIVEN_INITIAL_MUST_AGREE = True
+AUTHORS_MATCH_THRESHOLD = 0.8
+AUTHORS_FABRICATED_THRESHOLD = 0.5
+
+TITLE_MATCH_THRESHOLD = 0.8
+
+S2_CONFIRMING_TITLE_THRESHOLD = 0.85
+
+_DOI_URL_PREFIX = re.compile(r'^\s*(?:https?://)?(?:dx\.)?doi\.org/', re.IGNORECASE)
+
+
+def normalize_doi(raw: Optional[str]) -> str:
+    """Normalize a DOI string by stripping URL prefix, whitespace, and surrounding punctuation.
+
+    Returns empty string for None or empty input.
+    """
+    if not raw:
+        return ''
+    doi = raw.strip()
+    doi = _DOI_URL_PREFIX.sub('', doi)
+    doi = doi.strip().strip('<>').strip().rstrip('.,;')
+    return doi
+
+
+def split_name(full: str) -> Tuple[str, str, str]:
+    """Split a normalized "given family" name into (given_full, given_initial, family).
+
+    Robust to single-token names (returns family only) and multi-token given names.
+    """
+    full = full.strip()
+    if not full:
+        return ('', '', '')
+    parts = full.split()
+    if len(parts) == 1:
+        return ('', '', parts[0])
+    family = parts[-1]
+    given_full = ' '.join(parts[:-1])
+    given_initial = ''
+    for ch in given_full:
+        if ch.isalpha():
+            given_initial = ch.lower()
+            break
+    return (given_full.lower(), given_initial, family.lower())
 
 
 class CitationVerifier:
@@ -65,12 +118,12 @@ class CitationVerifier:
 
         # Rate limiting
         self.last_request_time = 0
-        self.min_request_interval = 0.5  # seconds between requests
+        self.min_request_interval = RATE_LIMIT_SECONDS
 
     def log(self, message: str):
-        """Print verbose logging with timestamp"""
+        """Print verbose logging with timestamp to stderr (so reports on stdout stay clean)."""
         if self.verbose:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}", file=sys.stderr)
 
     def rate_limit(self):
         """Enforce rate limiting between API calls to respect API quotas"""
@@ -81,79 +134,160 @@ class CitationVerifier:
 
     def parse_bibtex_file(self, filepath: Path) -> List[Dict]:
         """
-        Parse BibTeX file and extract citation entries
+        Parse BibTeX file and extract citation entries.
 
-        Args:
-            filepath (Path): Path to BibTeX file
-
-        Returns:
-            List[Dict]: List of citation entries with parsed fields
+        Uses a brace-balanced scanner so titles like ``{{TravisTorrent}: ...}``
+        are preserved instead of being truncated at the first inner ``}``.
         """
         self.log(f"Parsing BibTeX file: {filepath}")
 
         with open(filepath, 'r', encoding='utf-8') as f:
             content = f.read()
 
-        # Simple regex-based BibTeX parser
-        entry_pattern = r'@(\w+)\{([^,]+),\s*(.*?)\n\}'
         entries = []
+        i = 0
+        n = len(content)
 
-        for match in re.finditer(entry_pattern, content, re.DOTALL):
-            entry_type, entry_key, fields_str = match.groups()
+        while i < n:
+            at = content.find('@', i)
+            if at < 0:
+                break
+            type_match = re.match(r'@(\w+)\s*\{', content[at:])
+            if not type_match:
+                i = at + 1
+                continue
+            entry_type = type_match.group(1)
+            cursor = at + type_match.end()
 
-            # Parse fields
+            comma = content.find(',', cursor)
+            if comma < 0:
+                break
+            entry_key = content[cursor:comma].strip()
+            cursor = comma + 1
+
             fields = {'type': entry_type, 'key': entry_key}
-            field_pattern = r'(\w+)\s*=\s*\{([^}]*)\}'
+            depth = 1
+            field_buf = []
+            while cursor < n and depth > 0:
+                ch = content[cursor]
+                if ch == '{':
+                    depth += 1
+                    field_buf.append(ch)
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                    field_buf.append(ch)
+                else:
+                    field_buf.append(ch)
+                cursor += 1
+            fields_str = ''.join(field_buf)
 
-            for field_match in re.finditer(field_pattern, fields_str):
-                field_name, field_value = field_match.groups()
-                fields[field_name.lower()] = field_value.strip()
-
+            self._parse_fields(fields_str, fields)
             entries.append(fields)
+
+            i = cursor + 1 if depth == 0 else n
 
         self.log(f"Found {len(entries)} entries")
         return entries
 
+    def _parse_fields(self, body: str, fields: Dict) -> None:
+        """Extract ``name = value`` pairs from a BibTeX entry body, brace-balanced."""
+        i = 0
+        n = len(body)
+        while i < n:
+            while i < n and body[i] in ' \t\r\n,':
+                i += 1
+            if i >= n:
+                break
+            name_start = i
+            while i < n and (body[i].isalnum() or body[i] in '_-'):
+                i += 1
+            name = body[name_start:i].strip()
+            if not name:
+                i += 1
+                continue
+            while i < n and body[i] in ' \t\r\n':
+                i += 1
+            if i >= n or body[i] != '=':
+                continue
+            i += 1
+            while i < n and body[i] in ' \t\r\n':
+                i += 1
+            if i >= n:
+                break
+            if body[i] == '{':
+                depth = 1
+                i += 1
+                value_start = i
+                while i < n and depth > 0:
+                    if body[i] == '{':
+                        depth += 1
+                    elif body[i] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    i += 1
+                value = body[value_start:i]
+                i += 1
+            elif body[i] == '"':
+                i += 1
+                value_start = i
+                while i < n and body[i] != '"':
+                    i += 1
+                value = body[value_start:i]
+                i += 1
+            else:
+                value_start = i
+                while i < n and body[i] not in ',\n':
+                    i += 1
+                value = body[value_start:i]
+            value = value.strip()
+            value = self._strip_outer_braces(value)
+            fields[name.lower()] = value
+
+    @staticmethod
+    def _strip_outer_braces(value: str) -> str:
+        """Strip outer protective braces from a BibTeX value (e.g. ``{{Title}}`` -> ``{Title}``).
+
+        Only strips when the entire value is enclosed in a balanced outermost pair.
+        """
+        if len(value) >= 2 and value[0] == '{' and value[-1] == '}':
+            depth = 0
+            for idx, ch in enumerate(value):
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0 and idx != len(value) - 1:
+                        return value
+            return value[1:-1]
+        return value
+
     def clean_author_name(self, name: str) -> str:
-        """
-        Normalize author name for comparison (removes LaTeX commands, whitespace)
-
-        Args:
-            name (str): Raw author name
-
-        Returns:
-            str: Cleaned, lowercase author name
-        """
-        # Remove LaTeX accent commands like \"{a}, \'{e}, etc.
-        name = re.sub(r'\\[\'"`^~=.]{0,1}\{(.)\}', r'\1', name)
+        """Normalize an author name for comparison (LaTeX accents stripped, lowercased)."""
+        name = re.sub(r'\\[\'"`^~=.]\{(.)\}', r'\1', name)
+        name = re.sub(r'\{\\[\'"`^~=.]?(.)\}', r'\1', name)
         name = re.sub(r'\\[\'"`^~=.](.)', r'\1', name)
-
-        # Remove extra whitespace
+        name = name.replace('{', '').replace('}', '')
         name = ' '.join(name.split())
-
-        # Convert to lowercase for comparison
         return name.lower()
 
+    def display_author_name(self, name: str) -> str:
+        """Like ``clean_author_name`` but preserves original case (used for fix suggestions)."""
+        name = re.sub(r'\\[\'"`^~=.]\{(.)\}', r'\1', name)
+        name = re.sub(r'\{\\[\'"`^~=.]?(.)\}', r'\1', name)
+        name = re.sub(r'\\[\'"`^~=.](.)', r'\1', name)
+        name = name.replace('{', '').replace('}', '')
+        return ' '.join(name.split())
+
     def parse_authors(self, author_string: str) -> List[str]:
-        """
-        Parse BibTeX author string into list of normalized names
-
-        Args:
-            author_string (str): BibTeX author field (e.g., "Smith, John and Doe, Jane")
-
-        Returns:
-            List[str]: List of cleaned author names
-        """
+        """Parse BibTeX author string into list of normalized "given family" names."""
         if not author_string:
             return []
-
-        # Split by 'and'
         authors = re.split(r'\s+and\s+', author_string)
-
-        # Clean each author name
         cleaned = []
         for author in authors:
-            # Extract last name (after comma if present)
             if ',' in author:
                 parts = author.split(',')
                 last = parts[0].strip()
@@ -161,8 +295,23 @@ class CitationVerifier:
                 cleaned.append(f"{first} {last}".strip())
             else:
                 cleaned.append(author.strip())
-
         return [self.clean_author_name(a) for a in cleaned if a]
+
+    def parse_authors_display(self, author_string: str) -> List[str]:
+        """Like ``parse_authors`` but preserves original casing — for fix suggestions."""
+        if not author_string:
+            return []
+        authors = re.split(r'\s+and\s+', author_string)
+        out = []
+        for author in authors:
+            if ',' in author:
+                parts = author.split(',')
+                last = parts[0].strip()
+                first = parts[1].strip() if len(parts) > 1 else ""
+                out.append(f"{first} {last}".strip())
+            else:
+                out.append(author.strip())
+        return [self.display_author_name(a) for a in out if a]
 
     def similarity_ratio(self, str1: str, str2: str) -> float:
         """
@@ -219,13 +368,16 @@ class CitationVerifier:
                 'raw': message
             }
 
-            # Parse authors
+            # Parse authors — store both comparison form (lowercased, accent-stripped)
+            # and a display form (preserves casing) for fix suggestions
+            result['authors_display'] = []
             if 'author' in message:
                 for author in message['author']:
                     family = author.get('family', '')
                     given = author.get('given', '')
                     full_name = f"{given} {family}".strip()
                     result['authors'].append(self.clean_author_name(full_name))
+                    result['authors_display'].append(self.display_author_name(full_name))
 
             # Parse year
             if 'published' in message:
@@ -355,57 +507,68 @@ class CitationVerifier:
             return {'error': 'API_ERROR', 'message': str(e)}
 
     def compare_authors(self, claimed: List[str], actual: List[str]) -> Dict:
-        """
-        Compare claimed vs actual authors using fuzzy string matching
+        """Structure-aware author comparison.
 
-        Args:
-            claimed (List[str]): Authors from BibTeX entry
-            actual (List[str]): Authors from database
-
-        Returns:
-            Dict: Match result with similarity score and details
+        For each claimed author we extract the last name and try to match it (fuzzy
+        ≥ ``LAST_NAME_MATCH_THRESHOLD``) against the last name of any actual author.
+        When given names are present on both sides we additionally require the first
+        initial to agree — this catches fraud where a fraudster keeps a real given
+        name but swaps the family name. Score is the fraction of claimed authors
+        matched, mapped to VERIFIED / PARTIAL_MATCH / FABRICATED_AUTHORS.
         """
         if not claimed or not actual:
             return {
                 'match': False,
                 'similarity': 0.0,
-                'details': 'Missing author data'
+                'details': 'Missing author data',
+                'matched_count': 0,
+                'claimed_count': len(claimed) if claimed else 0,
             }
 
-        # Check if any claimed author appears in actual authors
-        matches = []
+        actual_split = [split_name(a) for a in actual]
+
+        per_author_matches = []
         for claimed_author in claimed:
-            best_match = max([self.similarity_ratio(claimed_author, actual_author)
-                            for actual_author in actual], default=0.0)
-            matches.append(best_match)
+            c_given_full, c_initial, c_family = split_name(claimed_author)
+            best = 0.0
+            for a_given_full, a_initial, a_family in actual_split:
+                if not a_family:
+                    continue
+                fam_sim = self.similarity_ratio(c_family, a_family)
+                if fam_sim < LAST_NAME_MATCH_THRESHOLD:
+                    continue
+                if (
+                    GIVEN_INITIAL_MUST_AGREE
+                    and c_initial
+                    and a_initial
+                    and c_initial != a_initial
+                ):
+                    continue
+                best = max(best, fam_sim)
+            per_author_matches.append(best >= LAST_NAME_MATCH_THRESHOLD)
 
-        avg_similarity = sum(matches) / len(matches) if matches else 0.0
+        matched_count = sum(1 for ok in per_author_matches if ok)
+        ratio = matched_count / len(per_author_matches)
 
-        # Determine match status
-        if avg_similarity < 0.3:
-            return {
-                'match': False,
-                'similarity': avg_similarity,
-                'details': 'FABRICATED_AUTHORS',
-                'claimed': claimed,
-                'actual': actual
-            }
-        elif avg_similarity < 0.8:
-            return {
-                'match': False,
-                'similarity': avg_similarity,
-                'details': 'PARTIAL_MATCH',
-                'claimed': claimed,
-                'actual': actual
-            }
+        if ratio >= AUTHORS_MATCH_THRESHOLD:
+            details = 'VERIFIED'
+            match = True
+        elif ratio >= AUTHORS_FABRICATED_THRESHOLD:
+            details = 'PARTIAL_MATCH'
+            match = False
         else:
-            return {
-                'match': True,
-                'similarity': avg_similarity,
-                'details': 'VERIFIED',
-                'claimed': claimed,
-                'actual': actual
-            }
+            details = 'FABRICATED_AUTHORS'
+            match = False
+
+        return {
+            'match': match,
+            'similarity': ratio,
+            'details': details,
+            'matched_count': matched_count,
+            'claimed_count': len(per_author_matches),
+            'claimed': claimed,
+            'actual': actual,
+        }
 
     def verify_citation(self, entry: Dict) -> Dict:
         """
@@ -417,14 +580,18 @@ class CitationVerifier:
         Returns:
             Dict: Comprehensive verification result
         """
+        raw_doi = entry.get('doi', '')
+        normalized_doi = normalize_doi(raw_doi)
         result = {
             'key': entry.get('key'),
             'type': entry.get('type'),
             'claimed': {
                 'title': entry.get('title', ''),
                 'authors': self.parse_authors(entry.get('author', '')),
+                'authors_display': self.parse_authors_display(entry.get('author', '')),
                 'year': entry.get('year', ''),
-                'doi': entry.get('doi', ''),
+                'doi': normalized_doi,
+                'doi_raw': raw_doi,
                 'venue': entry.get('journal') or entry.get('booktitle', '')
             },
             'verification': {
@@ -506,6 +673,7 @@ class CitationVerifier:
                             )
 
         # 2. Fallback: Verify via Semantic Scholar (if DOI validation failed or no DOI)
+        s2_confirmed = False
         if not result['verification']['doi_valid'] and result['claimed']['title']:
             s2_data = self.verify_via_semantic_scholar(
                 result['claimed']['title'],
@@ -515,24 +683,58 @@ class CitationVerifier:
             if s2_data and 'error' not in s2_data:
                 result['actual_data']['semantic_scholar'] = s2_data
 
-                # If we found a DOI via S2, check if it matches claimed DOI
+                if s2_data.get('title') and result['claimed']['title']:
+                    s2_title_sim = self.similarity_ratio(
+                        result['claimed']['title'], s2_data['title']
+                    )
+                    if s2_title_sim >= S2_CONFIRMING_TITLE_THRESHOLD:
+                        s2_confirmed = True
+
                 if s2_data.get('doi'):
+                    s2_doi_norm = normalize_doi(s2_data['doi'])
                     if result['claimed']['doi']:
-                        if s2_data['doi'].lower() != result['claimed']['doi'].lower():
+                        if s2_doi_norm.lower() != result['claimed']['doi'].lower():
+                            # If CrossRef said DOI_NOT_FOUND but S2 has a real DOI for this title,
+                            # the user's DOI is wrong (correctable) — drop the misleading
+                            # DOI_NOT_FOUND and keep only the actionable DOI_WRONG.
+                            result['issues'] = [
+                                i for i in result['issues'] if 'DOI_NOT_FOUND' not in i
+                            ]
                             result['issues'].append(
                                 f"DOI_WRONG: claimed={result['claimed']['doi']}, "
-                                f"actual={s2_data['doi']}"
+                                f"actual={s2_doi_norm}"
                             )
                     else:
-                        result['issues'].append(f"DOI_MISSING: actual={s2_data['doi']}")
+                        result['issues'].append(f"DOI_MISSING: actual={s2_doi_norm}")
 
-        # Determine overall status
-        if not result['issues']:
-            result['verification']['overall_status'] = 'VERIFIED'
-        elif any('FABRICATED' in issue for issue in result['issues']):
+        # Determine overall status.
+        # An entry whose DOI we never confirmed AND whose title S2 didn't match
+        # is *unverifiable*, not VERIFIED — falling through to VERIFIED was the
+        # biggest false-positive class in the previous version.
+        confirmed_any = bool(result['verification']['doi_valid']) or s2_confirmed
+        result['verification']['confirmed_any_source'] = confirmed_any
+
+        if any('FABRICATED' in issue for issue in result['issues']):
             result['verification']['overall_status'] = 'FABRICATED'
         elif any('DOI_NOT_FOUND' in issue for issue in result['issues']):
             result['verification']['overall_status'] = 'DOI_INVALID'
+        elif not result['issues']:
+            if confirmed_any:
+                result['verification']['overall_status'] = 'VERIFIED'
+            else:
+                result['verification']['overall_status'] = 'UNVERIFIED'
+                if 'notes' not in result:
+                    result['notes'] = []
+                if not result['claimed']['doi']:
+                    result['notes'].append(
+                        "No DOI in BibTeX entry; could not confirm against any "
+                        "authoritative source. Status is UNVERIFIED, not VERIFIED."
+                    )
+                else:
+                    result['notes'].append(
+                        "No authoritative source confirmed this citation. "
+                        "Status is UNVERIFIED."
+                    )
         elif len(result['issues']) >= 2:
             result['verification']['overall_status'] = 'SUSPICIOUS'
         else:
@@ -564,11 +766,11 @@ def generate_fix_suggestions(result: Dict) -> Dict:
     if result['actual_data'].get('crossref') and 'error' not in result['actual_data']['crossref']:
         cf = result['actual_data']['crossref']
 
-        # Check if authors need fixing
+        # Check if authors need fixing — prefer display-cased authors for the fix
         if 'authors_match' in result['verification']:
             author_match = result['verification']['authors_match']
             if isinstance(author_match, dict) and not author_match.get('match', True):
-                actual_authors = cf.get('authors', [])
+                actual_authors = cf.get('authors_display') or cf.get('authors', [])
                 if actual_authors:
                     fixes['has_fixes'] = True
                     fixes['suggested_authors'] = actual_authors
@@ -671,6 +873,7 @@ def generate_markdown_report(results: List[Dict]) -> str:
     """
     status_emoji = {
         'VERIFIED': '✅',
+        'UNVERIFIED': '❓',
         'WARNING': '⚠️',
         'SUSPICIOUS': '🔍',
         'FABRICATED': '❌',
@@ -701,7 +904,7 @@ def generate_markdown_report(results: List[Dict]) -> str:
         "|--------|-------|------------|----------|"
     ])
 
-    status_order = ['FABRICATED', 'DOI_INVALID', 'SUSPICIOUS', 'WARNING', 'VERIFIED']
+    status_order = ['FABRICATED', 'DOI_INVALID', 'SUSPICIOUS', 'WARNING', 'UNVERIFIED', 'VERIFIED']
     for status in status_order:
         count = statuses.get(status, 0)
         if count > 0:
@@ -709,7 +912,7 @@ def generate_markdown_report(results: List[Dict]) -> str:
             emoji = status_emoji.get(status, '•')
             severity = 'CRITICAL' if status in ['FABRICATED', 'DOI_INVALID'] else \
                       'HIGH' if status == 'SUSPICIOUS' else \
-                      'MEDIUM' if status == 'WARNING' else 'OK'
+                      'MEDIUM' if status in ['WARNING', 'UNVERIFIED'] else 'OK'
             lines.append(f"| {emoji} **{status}** | {count} | {percentage:.1f}% | {severity} |")
 
     lines.extend(["", "---", ""])
@@ -718,6 +921,7 @@ def generate_markdown_report(results: List[Dict]) -> str:
     fabricated = [r for r in results if r['verification']['overall_status'] == 'FABRICATED']
     invalid_doi = [r for r in results if r['verification']['overall_status'] == 'DOI_INVALID']
     suspicious = [r for r in results if r['verification']['overall_status'] == 'SUSPICIOUS']
+    unverified = [r for r in results if r['verification']['overall_status'] == 'UNVERIFIED']
 
     lines.append("## Key Findings")
     lines.append("")
@@ -728,6 +932,8 @@ def generate_markdown_report(results: List[Dict]) -> str:
         lines.append(f"🚫 **{len(invalid_doi)} INVALID DOIs** - Citations reference non-existent papers")
     if suspicious:
         lines.append(f"⚠️ **{len(suspicious)} SUSPICIOUS citations** - Multiple discrepancies found")
+    if unverified:
+        lines.append(f"❓ **{len(unverified)} UNVERIFIED citations** - Could not confirm against any authoritative source")
 
     verified_count = statuses.get('VERIFIED', 0)
     if verified_count > 0:
@@ -769,20 +975,22 @@ def generate_markdown_report(results: List[Dict]) -> str:
             badge_status = status.replace('_', '__')
             badge_color = 'red' if status in ['FABRICATED', 'DOI_INVALID'] else \
                          'orange' if status == 'SUSPICIOUS' else \
-                         'yellow' if status == 'WARNING' else 'green'
+                         'yellow' if status == 'WARNING' else \
+                         'lightgrey' if status == 'UNVERIFIED' else 'green'
             lines.append(f"![Status](https://img.shields.io/badge/Status-{badge_status}-{badge_color})")
             lines.append("")
 
-            # Claimed information
+            # Claimed information — prefer display-cased names when present
+            claimed_authors_disp = r['claimed'].get('authors_display') or r['claimed']['authors']
             lines.extend([
                 "**Claimed Information:**",
                 "",
                 f"- **Title:** {r['claimed']['title']}",
-                f"- **Authors:** {', '.join(r['claimed']['authors'][:5])}"
+                f"- **Authors:** {', '.join(claimed_authors_disp[:5])}"
             ])
 
-            if len(r['claimed']['authors']) > 5:
-                lines.append(f"  - *(+{len(r['claimed']['authors']) - 5} more authors)*")
+            if len(claimed_authors_disp) > 5:
+                lines.append(f"  - *(+{len(claimed_authors_disp) - 5} more authors)*")
 
             lines.extend([
                 f"- **Year:** {r['claimed']['year']}",
@@ -816,16 +1024,17 @@ def generate_markdown_report(results: List[Dict]) -> str:
             if r['actual_data'].get('crossref'):
                 cf = r['actual_data']['crossref']
                 if 'error' not in cf:
+                    actual_authors_disp = cf.get('authors_display') or cf.get('authors', [])
                     lines.extend([
                         "<details>",
                         "<summary><b>Actual Information (from CrossRef)</b></summary>",
                         "",
                         f"- **Title:** {cf.get('title', 'N/A')}",
-                        f"- **Authors:** {', '.join(cf.get('authors', [])[:5])}"
+                        f"- **Authors:** {', '.join(actual_authors_disp[:5])}"
                     ])
 
-                    if len(cf.get('authors', [])) > 5:
-                        lines.append(f"  - *(+{len(cf['authors']) - 5} more authors)*")
+                    if len(actual_authors_disp) > 5:
+                        lines.append(f"  - *(+{len(actual_authors_disp) - 5} more authors)*")
 
                     lines.extend([
                         f"- **Year:** {cf.get('year', 'N/A')}",
@@ -968,7 +1177,7 @@ def generate_text_report(results: List[Dict]) -> str:
     report_lines.extend(["", "=" * 80, "DETAILED FINDINGS:", "=" * 80, ""])
 
     # Detailed findings
-    for status in ['FABRICATED', 'DOI_INVALID', 'SUSPICIOUS', 'WARNING', 'VERIFIED']:
+    for status in ['FABRICATED', 'DOI_INVALID', 'SUSPICIOUS', 'WARNING', 'UNVERIFIED', 'VERIFIED']:
         status_results = [r for r in results if r['verification']['overall_status'] == status]
 
         if not status_results:
