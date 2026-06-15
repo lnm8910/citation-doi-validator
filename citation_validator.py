@@ -7,7 +7,8 @@ Verifies citations in BibTeX files by checking:
 2. Author name accuracy (fuzzy matching)
 3. Title matching
 4. Publication year/venue accuracy
-5. Cross-reference with academic databases (Semantic Scholar)
+5. Cross-reference with academic databases (Semantic Scholar, OpenAlex, DBLP, CrossRef)
+6. Reverse lookup of DOI-less entries by title/author/year (OpenAlex, CrossRef, DBLP)
 
 Author: Lalit Narayan Mishra
 License: MIT
@@ -36,7 +37,7 @@ except ImportError:
     sys.exit(1)
 
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __author__ = "Lalit Narayan Mishra"
 
 
@@ -50,6 +51,21 @@ AUTHORS_FABRICATED_THRESHOLD = 0.5
 TITLE_MATCH_THRESHOLD = 0.8
 
 S2_CONFIRMING_TITLE_THRESHOLD = 0.85
+
+# Reverse-lookup (DOI-less confirmation) thresholds. A DOI-less entry is confirmed
+# only with high title similarity AND author corroboration, which guards against
+# title-collision false positives (e.g. a same-titled but unrelated paper).
+REVLOOKUP_TITLE_GATE = 0.80          # min title similarity for a candidate to count
+REVLOOKUP_TITLE_CONFIRM = 0.85       # title similarity required to confirm a match
+REVLOOKUP_AUTHOR_CORROBORATE = 0.50  # fraction of claimed authors that must agree
+REVLOOKUP_CONFIRM_CONFIDENCE = 0.85  # combined confidence required to confirm (MATCHED)
+REVLOOKUP_AMBIGUOUS_FLOOR = 0.60     # confidence in [floor, confirm) -> AMBIGUOUS
+REVLOOKUP_ROWS = 5                   # candidates requested per source
+
+# OpenAlex polite-pool contact. OpenAlex is the primary reverse-lookup source: free,
+# no key, generous limits, and it indexes arXiv plus proceedings with authors + DOIs,
+# unlike DBLP / keyless Semantic Scholar which throttle aggressively on batch runs.
+OPENALEX_MAILTO = "citation-doi-validator@users.noreply.github.com"
 
 _DOI_URL_PREFIX = re.compile(r'^\s*(?:https?://)?(?:dx\.)?doi\.org/', re.IGNORECASE)
 
@@ -506,6 +522,278 @@ class CitationVerifier:
             self.log(f"Semantic Scholar API error: {e}")
             return {'error': 'API_ERROR', 'message': str(e)}
 
+    # ----- Reverse lookup: confirm DOI-less entries by title/author/year -----
+
+    def _http_get(self, url: str, params: Optional[Dict] = None, timeout: int = 15, max_retries: int = 3):
+        """Rate-limited GET with retry and backoff on 429/503 (honoring Retry-After).
+
+        Free metadata APIs (DBLP, CrossRef, Semantic Scholar) throttle bursty batch
+        runs; without this a transient 429 was being recorded as "not found" and the
+        best source (DBLP for CS papers) was silently lost mid-batch.
+        """
+        backoff = 1.0
+        response = None
+        for attempt in range(max_retries + 1):
+            self.rate_limit()
+            response = self.session.get(url, params=params, timeout=timeout)
+            if response.status_code in (429, 503) and attempt < max_retries:
+                retry_after = response.headers.get('Retry-After')
+                try:
+                    wait = float(retry_after) if retry_after else backoff
+                except (TypeError, ValueError):
+                    wait = backoff
+                wait = min(max(wait, backoff), 10.0)
+                self.log(f"HTTP {response.status_code} from {url.split('/')[2]}; backing off {wait:.1f}s")
+                time.sleep(wait)
+                backoff *= 2
+                continue
+            return response
+        return response
+
+    def _candidate_from_crossref_item(self, item: Dict) -> Dict:
+        """Map a CrossRef /works search item to a normalized candidate dict."""
+        authors, authors_display = [], []
+        for a in item.get('author', []) or []:
+            full = f"{a.get('given', '')} {a.get('family', '')}".strip()
+            if full:
+                authors.append(self.clean_author_name(full))
+                authors_display.append(self.display_author_name(full))
+        year = None
+        issued = item.get('issued', {}).get('date-parts', [[None]])
+        if issued and issued[0]:
+            year = issued[0][0]
+        return {
+            'title': (item.get('title') or [None])[0],
+            'authors': authors,
+            'authors_display': authors_display,
+            'year': year,
+            'venue': (item.get('container-title') or [None])[0],
+            'doi': normalize_doi(item.get('DOI')),
+            'type': item.get('type'),
+            'source': 'crossref-search',
+        }
+
+    def verify_via_crossref_search(self, title: str, rows: int = REVLOOKUP_ROWS) -> Optional[List[Dict]]:
+        """Reverse lookup: find candidate works in CrossRef by bibliographic query.
+
+        Returns a list of candidate dicts (possibly empty) on success, or None on a
+        network error, so callers can tell "searched, found nothing" from "could not
+        search".
+        """
+        if not title:
+            return []
+        self.log(f"Querying CrossRef search for: {title[:50]}...")
+        try:
+            params = {
+                'query.bibliographic': title,
+                'rows': rows,
+                'select': 'DOI,title,author,issued,container-title,type',
+            }
+            response = self._http_get("https://api.crossref.org/works", params=params)
+            response.raise_for_status()
+            items = response.json().get('message', {}).get('items', [])
+            return [self._candidate_from_crossref_item(it) for it in items]
+        except (requests.RequestException, ValueError) as e:
+            self.log(f"CrossRef search error: {e}")
+            return None
+
+    def _candidate_from_dblp_info(self, info: Dict) -> Dict:
+        """Map a DBLP publication 'info' object to a normalized candidate dict."""
+        raw = info.get('authors', {}).get('author', []) if info.get('authors') else []
+        if isinstance(raw, dict):
+            raw = [raw]
+        authors, authors_display = [], []
+        for a in raw:
+            name = a.get('text') if isinstance(a, dict) else a
+            if name:
+                name = re.sub(r'\s+\d{3,4}$', '', str(name)).strip()  # drop DBLP homonym digits
+                authors.append(self.clean_author_name(name))
+                authors_display.append(self.display_author_name(name))
+        try:
+            year = int(info.get('year')) if info.get('year') else None
+        except (TypeError, ValueError):
+            year = None
+        doi = normalize_doi(info.get('doi'))
+        if not doi and info.get('ee'):
+            m = re.search(r'(10\.\d{4,9}/\S+)', info.get('ee', ''))
+            if m:
+                doi = normalize_doi(m.group(1))
+        return {
+            'title': (info.get('title') or '').rstrip('.'),
+            'authors': authors,
+            'authors_display': authors_display,
+            'year': year,
+            'venue': info.get('venue'),
+            'doi': doi,
+            'type': info.get('type'),
+            'source': 'dblp',
+        }
+
+    def verify_via_dblp(self, title: str, rows: int = REVLOOKUP_ROWS) -> Optional[List[Dict]]:
+        """Reverse lookup: find candidate publications in DBLP by title query.
+
+        DBLP is the authoritative index for computer-science venues and frequently
+        carries the DOI even when a BibTeX entry omits it. Returns a list of
+        candidates on success, or None on a network error.
+        """
+        if not title:
+            return []
+        self.log(f"Querying DBLP for: {title[:50]}...")
+        try:
+            params = {'q': title, 'format': 'json', 'h': rows}
+            response = self._http_get("https://dblp.org/search/publ/api", params=params)
+            response.raise_for_status()
+            hits = response.json().get('result', {}).get('hits', {}).get('hit', [])
+            if isinstance(hits, dict):
+                hits = [hits]
+            return [self._candidate_from_dblp_info(h.get('info', {})) for h in hits]
+        except (requests.RequestException, ValueError) as e:
+            self.log(f"DBLP search error: {e}")
+            return None
+
+    def _candidate_from_openalex_work(self, work: Dict) -> Dict:
+        """Map an OpenAlex work object to a normalized candidate dict."""
+        authors, authors_display = [], []
+        for a in work.get('authorships', []) or []:
+            name = (a.get('author') or {}).get('display_name')
+            if name:
+                authors.append(self.clean_author_name(name))
+                authors_display.append(self.display_author_name(name))
+        src = (work.get('primary_location') or {}).get('source') or {}
+        return {
+            'title': work.get('display_name'),
+            'authors': authors,
+            'authors_display': authors_display,
+            'year': work.get('publication_year'),
+            'venue': src.get('display_name'),
+            'doi': normalize_doi(work.get('doi')),
+            'type': work.get('type'),
+            'source': 'openalex',
+        }
+
+    def verify_via_openalex(self, title: str, rows: int = REVLOOKUP_ROWS) -> Optional[List[Dict]]:
+        """Reverse lookup: find candidate works in OpenAlex by title search.
+
+        OpenAlex is the most batch-friendly free index (no key, high rate limits) and
+        covers arXiv and proceedings with authors and DOIs. Returns a list of
+        candidates on success, or None on a network error.
+        """
+        if not title:
+            return []
+        self.log(f"Querying OpenAlex for: {title[:50]}...")
+        # Strip punctuation that would otherwise break the title.search filter syntax.
+        clean = re.sub(r'[^\w\s-]', ' ', title).strip()
+        # 1) Precise title-only search; 2) fall back to broader full-text search when
+        #    the title index returns nothing (the confidence gate keeps precision high).
+        queries = (
+            {'filter': f'title.search:{clean}', 'per_page': rows, 'mailto': OPENALEX_MAILTO},
+            {'search': title, 'per_page': 25, 'mailto': OPENALEX_MAILTO},
+        )
+        for params in queries:
+            try:
+                response = self._http_get("https://api.openalex.org/works", params=params)
+                response.raise_for_status()
+                results = response.json().get('results', [])
+            except (requests.RequestException, ValueError) as e:
+                self.log(f"OpenAlex search error: {e}")
+                return None
+            if results:
+                return [self._candidate_from_openalex_work(w) for w in results]
+        return []  # both queries responded with no results
+
+    @staticmethod
+    def _year_proximity(claimed_year, candidate_year) -> float:
+        """Return a 0..1 closeness score for two years (neutral 0.5 when unknown)."""
+        try:
+            cy = int(str(claimed_year).strip())
+            ay = int(str(candidate_year).strip())
+        except (TypeError, ValueError):
+            return 0.5
+        diff = abs(cy - ay)
+        if diff == 0:
+            return 1.0
+        if diff == 1:
+            return 0.8
+        if diff == 2:
+            return 0.4
+        return 0.0
+
+    def score_metadata_match(self, claimed: Dict, candidate: Dict) -> Dict:
+        """Score how well a search candidate matches the claimed citation.
+
+        Combines title similarity (gated), author overlap (reusing compare_authors),
+        and year proximity into a single confidence in [0, 1].
+        """
+        cand_title = (candidate.get('title') or '').strip().rstrip('.')
+        claimed_title = (claimed.get('title') or '').strip().rstrip('.')
+        if not cand_title or not claimed_title:
+            return {'confidence': 0.0, 'title_sim': 0.0, 'author_ratio': 0.0, 'year_close': 0.0}
+        title_sim = self.similarity_ratio(claimed_title, cand_title)
+        author_cmp = self.compare_authors(claimed.get('authors', []), candidate.get('authors', []))
+        author_ratio = author_cmp.get('similarity', 0.0)
+        year_close = self._year_proximity(claimed.get('year'), candidate.get('year'))
+        if title_sim < REVLOOKUP_TITLE_GATE:
+            confidence = title_sim * 0.4  # below the gate this can never be a confident match
+        else:
+            confidence = 0.50 * title_sim + 0.35 * author_ratio + 0.15 * year_close
+        return {
+            'confidence': round(confidence, 4),
+            'title_sim': round(title_sim, 4),
+            'author_ratio': round(author_ratio, 4),
+            'year_close': year_close,
+        }
+
+    @staticmethod
+    def _match_is_confirmed(score: Dict) -> bool:
+        """A match is confirmed only with high title similarity AND author corroboration."""
+        return (
+            score['title_sim'] >= REVLOOKUP_TITLE_CONFIRM
+            and score['author_ratio'] >= REVLOOKUP_AUTHOR_CORROBORATE
+            and score['confidence'] >= REVLOOKUP_CONFIRM_CONFIDENCE
+        )
+
+    def reverse_lookup(self, claimed: Dict) -> Dict:
+        """Confirm a DOI-less (or DOI-invalid) citation by searching authoritative
+        indexes (DBLP first, then CrossRef) by title and corroborating author/year.
+
+        Returns {status, best, errored, sources_tried} where status is one of
+        'matched' | 'ambiguous' | 'not_found' | 'no_title' | 'error'.
+        """
+        title = claimed.get('title')
+        if not title:
+            return {'status': 'no_title', 'best': None, 'errored': False, 'sources_tried': []}
+
+        best = None
+        sources_tried = []
+        errored = False
+        for source_fn in (self.verify_via_openalex, self.verify_via_crossref_search, self.verify_via_dblp):
+            candidates = source_fn(title)
+            if candidates is None:
+                errored = True
+                continue
+            sources_tried.append(candidates[0]['source'] if candidates else 'searched')
+            for cand in candidates:
+                score = self.score_metadata_match(claimed, cand)
+                if best is None or score['confidence'] > best['score']['confidence']:
+                    best = {
+                        'candidate': cand,
+                        'score': score,
+                        'source': cand['source'],
+                        'confidence': score['confidence'],
+                    }
+            if best and self._match_is_confirmed(best['score']):
+                break  # confident, corroborated match: stop early to save API calls
+
+        if best and self._match_is_confirmed(best['score']):
+            status = 'matched'
+        elif best and best['confidence'] >= REVLOOKUP_AMBIGUOUS_FLOOR:
+            status = 'ambiguous'
+        elif not sources_tried:
+            status = 'error'
+        else:
+            status = 'not_found'
+        return {'status': status, 'best': best, 'errored': errored, 'sources_tried': sources_tried}
+
     def compare_authors(self, claimed: List[str], actual: List[str]) -> Dict:
         """Structure-aware author comparison.
 
@@ -672,31 +960,35 @@ class CitationVerifier:
                                 f"actual={crossref_data['year']}"
                             )
 
-        # 2. Fallback: Verify via Semantic Scholar (if DOI validation failed or no DOI)
+        # 2. No confirmable DOI: confirm by metadata against authoritative indexes.
+        #    Semantic Scholar (title), then a corroborated reverse lookup across
+        #    DBLP and CrossRef (title plus author plus year).
         s2_confirmed = False
+        metadata_match = None
+        reverse_status = None
+        recovered_doi = None
+
         if not result['verification']['doi_valid'] and result['claimed']['title']:
+            # 2a. Semantic Scholar title search (kept from prior versions).
             s2_data = self.verify_via_semantic_scholar(
                 result['claimed']['title'],
                 result['claimed']['authors']
             )
-
             if s2_data and 'error' not in s2_data:
                 result['actual_data']['semantic_scholar'] = s2_data
-
-                if s2_data.get('title') and result['claimed']['title']:
+                if s2_data.get('title'):
                     s2_title_sim = self.similarity_ratio(
                         result['claimed']['title'], s2_data['title']
                     )
                     if s2_title_sim >= S2_CONFIRMING_TITLE_THRESHOLD:
                         s2_confirmed = True
-
                 if s2_data.get('doi'):
                     s2_doi_norm = normalize_doi(s2_data['doi'])
                     if result['claimed']['doi']:
                         if s2_doi_norm.lower() != result['claimed']['doi'].lower():
-                            # If CrossRef said DOI_NOT_FOUND but S2 has a real DOI for this title,
-                            # the user's DOI is wrong (correctable) — drop the misleading
-                            # DOI_NOT_FOUND and keep only the actionable DOI_WRONG.
+                            # CrossRef said DOI_NOT_FOUND but S2 has a real DOI for this
+                            # title: the claimed DOI is wrong (correctable). Replace the
+                            # misleading DOI_NOT_FOUND with the actionable DOI_WRONG.
                             result['issues'] = [
                                 i for i in result['issues'] if 'DOI_NOT_FOUND' not in i
                             ]
@@ -705,40 +997,96 @@ class CitationVerifier:
                                 f"actual={s2_doi_norm}"
                             )
                     else:
-                        result['issues'].append(f"DOI_MISSING: actual={s2_doi_norm}")
+                        recovered_doi = s2_doi_norm
 
-        # Determine overall status.
-        # An entry whose DOI we never confirmed AND whose title S2 didn't match
-        # is *unverifiable*, not VERIFIED — falling through to VERIFIED was the
-        # biggest false-positive class in the previous version.
-        confirmed_any = bool(result['verification']['doi_valid']) or s2_confirmed
+            # 2b. Corroborated reverse lookup (DBLP first, then CrossRef bibliographic).
+            rev = self.reverse_lookup(result['claimed'])
+            reverse_status = rev['status']
+            result['verification']['reverse_lookup_status'] = reverse_status
+            if rev['best']:
+                cand = rev['best']['candidate']
+                result['actual_data']['metadata_match'] = {
+                    'source': rev['best']['source'],
+                    'confidence': rev['best']['confidence'],
+                    'title': cand.get('title'),
+                    'authors': cand.get('authors_display') or cand.get('authors'),
+                    'year': cand.get('year'),
+                    'venue': cand.get('venue'),
+                    'doi': cand.get('doi'),
+                    'score': rev['best']['score'],
+                }
+                if reverse_status == 'matched':
+                    metadata_match = result['actual_data']['metadata_match']
+                    if not recovered_doi and cand.get('doi'):
+                        recovered_doi = cand['doi']
+
+        if recovered_doi and not result['claimed']['doi']:
+            result['verification']['recovered_doi'] = recovered_doi
+        if metadata_match:
+            result['verification']['match_source'] = metadata_match['source']
+            result['verification']['match_confidence'] = metadata_match['confidence']
+
+        # Determine overall status. A missing DOI that we recovered is a fixable
+        # detail, not a defect, so it never degrades the status by itself.
+        confirmed_any = (
+            bool(result['verification']['doi_valid'])
+            or s2_confirmed
+            or metadata_match is not None
+        )
         result['verification']['confirmed_any_source'] = confirmed_any
+        real_issues = [i for i in result['issues'] if not i.startswith('DOI_MISSING')]
 
-        if any('FABRICATED' in issue for issue in result['issues']):
+        if 'notes' not in result:
+            result['notes'] = []
+
+        if any('FABRICATED' in issue for issue in real_issues):
             result['verification']['overall_status'] = 'FABRICATED'
-        elif any('DOI_NOT_FOUND' in issue for issue in result['issues']):
+        elif any('DOI_NOT_FOUND' in issue for issue in real_issues):
             result['verification']['overall_status'] = 'DOI_INVALID'
-        elif not result['issues']:
-            if confirmed_any:
+        elif len(real_issues) >= 2:
+            result['verification']['overall_status'] = 'SUSPICIOUS'
+        elif len(real_issues) == 1:
+            result['verification']['overall_status'] = 'WARNING'
+        elif result['verification']['doi_valid']:
+            result['verification']['overall_status'] = 'VERIFIED'
+        elif metadata_match is not None or s2_confirmed:
+            # Confirmed by a metadata index rather than by DOI.
+            if result['claimed']['doi']:
                 result['verification']['overall_status'] = 'VERIFIED'
             else:
-                result['verification']['overall_status'] = 'UNVERIFIED'
-                if 'notes' not in result:
-                    result['notes'] = []
-                if not result['claimed']['doi']:
-                    result['notes'].append(
-                        "No DOI in BibTeX entry; could not confirm against any "
-                        "authoritative source. Status is UNVERIFIED, not VERIFIED."
-                    )
-                else:
-                    result['notes'].append(
-                        "No authoritative source confirmed this citation. "
-                        "Status is UNVERIFIED."
-                    )
-        elif len(result['issues']) >= 2:
-            result['verification']['overall_status'] = 'SUSPICIOUS'
+                result['verification']['overall_status'] = 'MATCHED'
+                src = result['verification'].get('match_source') or 'Semantic Scholar'
+                doi_hint = f" Recovered DOI {recovered_doi} is suggested as a fix." if recovered_doi else ""
+                result['notes'].append(
+                    f"No DOI in entry, but the citation was confirmed by a metadata "
+                    f"match against {src}.{doi_hint}"
+                )
+        elif reverse_status == 'ambiguous':
+            result['verification']['overall_status'] = 'AMBIGUOUS'
+            best = result['actual_data'].get('metadata_match', {})
+            result['notes'].append(
+                f"A possible match was found in {best.get('source', 'an index')} "
+                f"(confidence {best.get('confidence', 0)}), but author or year "
+                f"corroboration was insufficient to confirm it. Manual check recommended."
+            )
+        elif reverse_status == 'not_found':
+            result['verification']['overall_status'] = 'NOT_FOUND'
+            result['notes'].append(
+                "Searched DBLP and CrossRef by title; no matching record was found. "
+                "Verify this citation manually."
+            )
         else:
-            result['verification']['overall_status'] = 'WARNING'
+            result['verification']['overall_status'] = 'UNVERIFIED'
+            if not result['claimed']['doi']:
+                result['notes'].append(
+                    "No DOI in entry and authoritative sources could not be reached to "
+                    "confirm it. Status is UNVERIFIED, not VERIFIED."
+                )
+            else:
+                result['notes'].append(
+                    "No authoritative source confirmed this citation. "
+                    "Status is UNVERIFIED."
+                )
 
         return result
 
@@ -762,11 +1110,10 @@ def generate_fix_suggestions(result: Dict) -> Dict:
         'bibtex_entry': None
     }
 
-    # Get actual data from CrossRef
-    if result['actual_data'].get('crossref') and 'error' not in result['actual_data']['crossref']:
-        cf = result['actual_data']['crossref']
-
-        # Check if authors need fixing — prefer display-cased authors for the fix
+    # Fixes derived from a DOI-matched CrossRef record.
+    cf = result['actual_data'].get('crossref')
+    if cf and 'error' not in cf:
+        # Authors (prefer display-cased names for the suggested fix).
         if 'authors_match' in result['verification']:
             author_match = result['verification']['authors_match']
             if isinstance(author_match, dict) and not author_match.get('match', True):
@@ -775,7 +1122,7 @@ def generate_fix_suggestions(result: Dict) -> Dict:
                     fixes['has_fixes'] = True
                     fixes['suggested_authors'] = actual_authors
 
-        # Check if DOI needs fixing
+        # DOI (wrong DOI, or missing DOI that CrossRef supplies).
         if result['claimed']['doi'] and cf.get('doi'):
             if result['claimed']['doi'].lower() != cf.get('doi', '').lower():
                 fixes['has_fixes'] = True
@@ -784,19 +1131,22 @@ def generate_fix_suggestions(result: Dict) -> Dict:
             fixes['has_fixes'] = True
             fixes['suggested_doi'] = cf.get('doi')
 
-        # Check if title needs fixing
         if result['verification'].get('title_match') is False:
             fixes['has_fixes'] = True
             fixes['suggested_title'] = cf.get('title')
 
-        # Check if year needs fixing
         if result['verification'].get('year_match') is False:
             fixes['has_fixes'] = True
             fixes['suggested_year'] = cf.get('year')
 
-        # Generate corrected BibTeX entry
-        if fixes['has_fixes']:
-            fixes['bibtex_entry'] = reconstruct_bibtex_entry(result, fixes)
+    # DOI recovered from a metadata reverse-lookup match (DOI-less entries).
+    recovered = result.get('verification', {}).get('recovered_doi')
+    if recovered and not result['claimed'].get('doi') and not fixes['suggested_doi']:
+        fixes['has_fixes'] = True
+        fixes['suggested_doi'] = recovered
+
+    if fixes['has_fixes']:
+        fixes['bibtex_entry'] = reconstruct_bibtex_entry(result, fixes)
 
     return fixes
 
@@ -873,7 +1223,10 @@ def generate_markdown_report(results: List[Dict]) -> str:
     """
     status_emoji = {
         'VERIFIED': '✅',
+        'MATCHED': '🟢',
         'UNVERIFIED': '❓',
+        'AMBIGUOUS': '🟡',
+        'NOT_FOUND': '🔎',
         'WARNING': '⚠️',
         'SUSPICIOUS': '🔍',
         'FABRICATED': '❌',
@@ -904,7 +1257,7 @@ def generate_markdown_report(results: List[Dict]) -> str:
         "|--------|-------|------------|----------|"
     ])
 
-    status_order = ['FABRICATED', 'DOI_INVALID', 'SUSPICIOUS', 'WARNING', 'UNVERIFIED', 'VERIFIED']
+    status_order = ['FABRICATED', 'DOI_INVALID', 'SUSPICIOUS', 'WARNING', 'NOT_FOUND', 'AMBIGUOUS', 'UNVERIFIED', 'MATCHED', 'VERIFIED']
     for status in status_order:
         count = statuses.get(status, 0)
         if count > 0:
@@ -912,7 +1265,8 @@ def generate_markdown_report(results: List[Dict]) -> str:
             emoji = status_emoji.get(status, '•')
             severity = 'CRITICAL' if status in ['FABRICATED', 'DOI_INVALID'] else \
                       'HIGH' if status == 'SUSPICIOUS' else \
-                      'MEDIUM' if status in ['WARNING', 'UNVERIFIED'] else 'OK'
+                      'MEDIUM' if status in ['WARNING', 'NOT_FOUND'] else \
+                      'REVIEW' if status in ['AMBIGUOUS', 'UNVERIFIED'] else 'OK'
             lines.append(f"| {emoji} **{status}** | {count} | {percentage:.1f}% | {severity} |")
 
     lines.extend(["", "---", ""])
@@ -921,7 +1275,10 @@ def generate_markdown_report(results: List[Dict]) -> str:
     fabricated = [r for r in results if r['verification']['overall_status'] == 'FABRICATED']
     invalid_doi = [r for r in results if r['verification']['overall_status'] == 'DOI_INVALID']
     suspicious = [r for r in results if r['verification']['overall_status'] == 'SUSPICIOUS']
+    not_found = [r for r in results if r['verification']['overall_status'] == 'NOT_FOUND']
+    ambiguous = [r for r in results if r['verification']['overall_status'] == 'AMBIGUOUS']
     unverified = [r for r in results if r['verification']['overall_status'] == 'UNVERIFIED']
+    matched = [r for r in results if r['verification']['overall_status'] == 'MATCHED']
 
     lines.append("## Key Findings")
     lines.append("")
@@ -932,8 +1289,14 @@ def generate_markdown_report(results: List[Dict]) -> str:
         lines.append(f"🚫 **{len(invalid_doi)} INVALID DOIs** - Citations reference non-existent papers")
     if suspicious:
         lines.append(f"⚠️ **{len(suspicious)} SUSPICIOUS citations** - Multiple discrepancies found")
+    if not_found:
+        lines.append(f"🔎 **{len(not_found)} NOT_FOUND** - No matching record located in DBLP or CrossRef by title")
+    if ambiguous:
+        lines.append(f"🟡 **{len(ambiguous)} AMBIGUOUS** - A possible match was found but not corroborated; manual check recommended")
     if unverified:
         lines.append(f"❓ **{len(unverified)} UNVERIFIED citations** - Could not confirm against any authoritative source")
+    if matched:
+        lines.append(f"🟢 **{len(matched)} MATCHED** - No DOI in the entry, but confirmed via DBLP/CrossRef metadata (DOI recoverable)")
 
     verified_count = statuses.get('VERIFIED', 0)
     if verified_count > 0:
@@ -974,9 +1337,10 @@ def generate_markdown_report(results: List[Dict]) -> str:
             # Status badge
             badge_status = status.replace('_', '__')
             badge_color = 'red' if status in ['FABRICATED', 'DOI_INVALID'] else \
-                         'orange' if status == 'SUSPICIOUS' else \
-                         'yellow' if status == 'WARNING' else \
-                         'lightgrey' if status == 'UNVERIFIED' else 'green'
+                         'orange' if status in ['SUSPICIOUS', 'NOT_FOUND'] else \
+                         'yellow' if status in ['WARNING', 'AMBIGUOUS'] else \
+                         'lightgrey' if status == 'UNVERIFIED' else \
+                         'brightgreen' if status == 'MATCHED' else 'green'
             lines.append(f"![Status](https://img.shields.io/badge/Status-{badge_status}-{badge_color})")
             lines.append("")
 
@@ -1045,8 +1409,26 @@ def generate_markdown_report(results: List[Dict]) -> str:
                         ""
                     ])
 
-            # Generate and display fix suggestions
-            if r['issues']:
+            # Closest match from a metadata reverse-lookup (DBLP / CrossRef search)
+            mm = r['actual_data'].get('metadata_match')
+            if mm:
+                lines.extend([
+                    "<details>",
+                    f"<summary><b>Closest match (from {mm.get('source', 'index')}, "
+                    f"confidence {mm.get('confidence')})</b></summary>",
+                    "",
+                    f"- **Title:** {mm.get('title', 'N/A')}",
+                    f"- **Authors:** {', '.join((mm.get('authors') or [])[:5])}",
+                    f"- **Year:** {mm.get('year', 'N/A')}",
+                    f"- **DOI:** `{mm.get('doi') or 'N/A'}`",
+                    f"- **Venue:** {mm.get('venue', 'N/A')}",
+                    "",
+                    "</details>",
+                    ""
+                ])
+
+            # Generate and display fix suggestions (also for DOIs recovered on DOI-less entries)
+            if r['issues'] or r.get('verification', {}).get('recovered_doi'):
                 fixes = generate_fix_suggestions(r)
 
                 if fixes['has_fixes']:
@@ -1137,6 +1519,7 @@ def generate_markdown_report(results: List[Dict]) -> str:
         "- ✅ Checks publication metadata (title, year, venue)",
         "- ✅ Uses fuzzy matching to detect variations",
         "- ✅ Cross-references with Semantic Scholar",
+        "- ✅ Recovers DOI-less entries via OpenAlex, DBLP, and CrossRef reverse lookup (MATCHED / AMBIGUOUS / NOT_FOUND)",
         "",
         f"**Version:** {__version__}  ",
         f"**Repository:** https://github.com/lnm8910/citation-doi-validator  ",
@@ -1177,7 +1560,7 @@ def generate_text_report(results: List[Dict]) -> str:
     report_lines.extend(["", "=" * 80, "DETAILED FINDINGS:", "=" * 80, ""])
 
     # Detailed findings
-    for status in ['FABRICATED', 'DOI_INVALID', 'SUSPICIOUS', 'WARNING', 'UNVERIFIED', 'VERIFIED']:
+    for status in ['FABRICATED', 'DOI_INVALID', 'SUSPICIOUS', 'WARNING', 'NOT_FOUND', 'AMBIGUOUS', 'UNVERIFIED', 'MATCHED', 'VERIFIED']:
         status_results = [r for r in results if r['verification']['overall_status'] == status]
 
         if not status_results:

@@ -12,8 +12,8 @@
         {"key": "m5_fake_doi",        "expected": "DOI_INVALID",  "probes": "Invented DOI"},
         {"key": "m6_whitespace_doi",  "expected": "DOI_INVALID",  "probes": "Whitespace-padded DOI must still be parsed and queried"},
         {"key": "m7_doi_as_url",      "expected": "VERIFIED",     "probes": "DOI given as full URL must be normalized and resolved"},
-        {"key": "m8_no_doi_fake",     "expected": "UNVERIFIED",   "probes": "No DOI + fake title must NOT silently VERIFY"},
-        {"key": "m9_no_doi_no_title", "expected": "UNVERIFIED",   "probes": "Empty entry must NOT silently VERIFY"},
+        {"key": "m8_no_doi_fake",     "expected": ["UNVERIFIED", "NOT_FOUND"],   "probes": "No DOI + fake title: reverse lookup finds nothing, so NOT_FOUND (or UNVERIFIED if sources unreachable). Must NOT VERIFY/MATCH."},
+        {"key": "m9_no_doi_no_title", "expected": "UNVERIFIED",   "probes": "Empty entry (no title): cannot search, so UNVERIFIED. Must NOT silently VERIFY"},
         {"key": "m10_unicode_accent", "expected": "VERIFIED",     "probes": "LaTeX accents in author names should not break matching"},
         {"key": "m11_nested_braces",  "expected": "VERIFIED",     "probes": "Nested braces in title must be parsed correctly"},
         {"key": "m12_multiline",      "expected": "VERIFIED",     "probes": "Multi-line author field with trailing comma must parse"}
@@ -42,7 +42,7 @@
         {"key": "rw_brisset2018models",         "expected": "DOI_INVALID", "probes": "DOI returns 404 from both CrossRef and doi.org Handle"},
         {"key": "rw_hanssens1980market",        "expected": "FABRICATED",  "probes": "DOI resolves but to a different paper than claimed"},
         {"key": "rw_vallecruz2022twitter",      "expected": "DOI_INVALID", "probes": "Another confirmed-404 DOI"},
-        {"key": "rw_montgomery2015introduction","expected": "UNVERIFIED",  "probes": "No DOI book entry must not silently VERIFY"}
+        {"key": "rw_montgomery2015introduction","expected": ["UNVERIFIED", "MATCHED", "AMBIGUOUS", "NOT_FOUND"],  "probes": "No-DOI book: reverse lookup may MATCH it in CrossRef (recovering a DOI) or not; must NOT be silently VERIFIED via DOI"}
       ]
     }
   }

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.0] - 2026-06-13
+
+### Added (reverse lookup for DOI-less entries)
+- **Confirm citations that have no DOI by matching them against authoritative indexes**, instead of leaving them `UNVERIFIED`. New sources: OpenAlex (primary; no key, batch-friendly), CrossRef bibliographic `query.bibliographic` search, and DBLP. Queried by title with author and year corroboration.
+- **Three new statuses:** `MATCHED` (🟢, no DOI in the entry but the work was confirmed in an index, with the DOI recovered as a fix), `AMBIGUOUS` (🟡, a candidate was found but title/author/year corroboration was below the confirm threshold; needs a human check), and `NOT_FOUND` (🔎, searched and nothing matched; the genuine "could not locate" flag, distinct from "could not check").
+- **Confidence-scored matching** (`score_metadata_match`) combining gated title similarity, author overlap (reusing `compare_authors`), and year proximity. A match is confirmed only with title similarity ≥ 0.85 AND author corroboration ≥ 0.5 AND combined confidence ≥ 0.85, which blocks title-collision false positives (verified by unit test and the fake/book regression fixtures).
+- **Recovered DOIs are back-filled** into the suggested-fix BibTeX entry, turning a missing-DOI finding into a copy-paste correction.
+- **HTTP retry with backoff** (`_http_get`) on 429/503 (honoring `Retry-After`) for the search sources.
+- New thresholds: `REVLOOKUP_*` constants and `OPENALEX_MAILTO`.
+
+### Changed
+- Status taxonomy is now nine statuses (added MATCHED, AMBIGUOUS, NOT_FOUND). `DOI_MISSING` is treated as a recoverable fix rather than a status-degrading issue. Markdown and text reports render the new statuses, severities, and a "Closest match" panel.
+- The no-DOI path is no longer Semantic-Scholar-only; S2 (keyless, heavily throttled) is now one of several corroborating sources, with OpenAlex as the reliable primary.
+
+### Behavior changes that may surprise existing users
+- Many entries that previously reported `UNVERIFIED` (no DOI to auto-check) now report `MATCHED` with a recovered DOI, or `NOT_FOUND` if genuinely absent. On a 39-entry real-world ML bibliography this converted 34 `UNVERIFIED`/`WARNING` entries into 34 `MATCHED` (0 false positives on audit), recovering 30 DOIs.
+
+---
+
 ## [1.1.0] - 2026-05-02
 
 ### Fixed (correctness)
